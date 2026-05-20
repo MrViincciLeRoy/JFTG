@@ -122,38 +122,42 @@ def save_case(case: dict):
     log.info(f"Saved → {path}")
 
 
-# ── Search via Google (Playwright) ────────────────────────────────────────────
+# ── Search via DuckDuckGo HTML (no JS, no CAPTCHA) ───────────────────────────
+# Google detects headless Chromium on CI IPs and serves a consent/bot page.
+# DuckDuckGo's plain-HTML endpoint works reliably without JavaScript.
 
-async def google_search(page, query: str, max_results: int = 15) -> list[str]:
-    """
-    Use Google via real Chromium browser.
-    Works fine on residential IPs — no CAPTCHA for normal browsing patterns.
-    """
+async def ddg_search(page, query: str, max_results: int = 15) -> list[str]:
     urls = []
     try:
-        encoded = query.replace(" ", "+")
-        await page.goto(
-            f"https://www.google.com/search?q={encoded}&num=20",
-            wait_until="domcontentloaded",
-            timeout=30000,
-        )
-        # Wait for results to render
-        await page.wait_for_selector("#search", timeout=10000)
-        await page.wait_for_timeout(random.randint(1500, 3000))
+        encoded = requests.utils.quote(query)
+        url = f"https://html.duckduckgo.com/html/?q={encoded}"
+        log.info(f"DDG search: {url}")
 
-        # Google result links are in <a> tags inside #search
-        # The actual URL is the href, but some go through google.com/url?q=
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(random.randint(1500, 2500))
+
+        # ── DEBUG: dump first 3000 chars of page so we can see what arrived ──
+        content = await page.content()
+        log.info(f"[DEBUG] Page title: {await page.title()!r}")
+        log.info(f"[DEBUG] Page HTML snippet (first 3000 chars):\n{content[:3000]}")
+
+        # DDG HTML result links are <a class="result__a" href="...">
+        # The href is a redirect: /l/?uddg=ENCODED_REAL_URL&...
         links = await page.eval_on_selector_all(
-            "#search a[href]",
+            "a.result__a",
             """els => els.map(e => {
                 let h = e.href;
-                // unwrap google redirect: /url?q=ACTUAL_URL&...
-                if (h.includes('/url?q=')) {
-                    h = decodeURIComponent(h.split('/url?q=')[1].split('&')[0]);
-                }
+                // unwrap DDG redirect /l/?uddg=...
+                try {
+                    const u = new URL(h);
+                    const uddg = u.searchParams.get('uddg');
+                    if (uddg) return decodeURIComponent(uddg);
+                } catch(_) {}
                 return h;
             })"""
         )
+
+        log.info(f"[DEBUG] Raw links found ({len(links)}): {links[:10]}")
 
         for link in links:
             if "saflii.org" in link and link.endswith(".pdf") and link not in urls:
@@ -162,8 +166,11 @@ async def google_search(page, query: str, max_results: int = 15) -> list[str]:
                 if len(urls) >= max_results:
                     break
 
+        if not urls:
+            log.warning(f"No saflii PDF links found for query: {query!r}")
+
     except Exception as e:
-        log.warning(f"Google search failed for '{query}': {e}")
+        log.warning(f"DDG search failed for '{query}': {e}")
 
     return urls
 
@@ -245,12 +252,12 @@ async def run_async(queries=None, max_per_query=15):
         )
 
         # ── Search ──
-        log.info("=== Searching Google for SAFLII cases ===")
+        log.info("=== Searching DuckDuckGo for SAFLII cases ===")
         for query in queries:
-            found = await google_search(page, query, max_per_query)
+            found = await ddg_search(page, query, max_per_query)
             all_urls.update(found)
             log.info(f"Running total: {len(all_urls)} URLs")
-            await asyncio.sleep(random.uniform(4, 9))  # human-like delay between searches
+            await asyncio.sleep(random.uniform(3, 6))
 
         log.info(f"Total unique PDFs: {len(all_urls)}")
 
