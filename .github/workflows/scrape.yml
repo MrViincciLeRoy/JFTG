@@ -2,7 +2,7 @@ name: SAFLII Crime Scraper
 
 on:
   schedule:
-    - cron: "0 3 * * 1"   # every Monday 3AM UTC
+    - cron: "0 3 * * 1"
   workflow_dispatch:
 
 jobs:
@@ -23,14 +23,38 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y tor
-          sudo service tor start
-          sleep 8
-          curl --socks5 127.0.0.1:9050 --socks5-hostname 127.0.0.1:9050 \
-            -s https://check.torproject.org/api/ip | python3 -c \
-            "import sys,json; d=json.load(sys.stdin); print('Tor:', d.get('IsTor'), '| IP:', d.get('IP'))"
+          # GH Actions has no systemd ? start tor directly as a process
+          sudo tor --RunAsDaemon 1 --Log "notice file /tmp/tor.log"
+          echo "Waiting for Tor to bootstrap..."
+          for i in $(seq 1 24); do
+            sleep 5
+            if grep -q "Bootstrapped 100%" /tmp/tor.log 2>/dev/null; then
+              echo "Tor bootstrapped after $((i*5))s"
+              break
+            fi
+            echo "  ...${i}/${24} waiting"
+          done
+          cat /tmp/tor.log | tail -5
+
+      - name: Verify Tor
+        run: |
+          python3 -c "
+          import requests, warnings
+          warnings.filterwarnings('ignore')
+          try:
+              r = requests.get(
+                  'https://check.torproject.org/api/ip',
+                  proxies={'http':'socks5://127.0.0.1:9050','https':'socks5://127.0.0.1:9050'},
+                  timeout=15, verify=False
+              )
+              d = r.json()
+              print('Tor active:', d.get('IsTor'), '| Exit IP:', d.get('IP'))
+          except Exception as e:
+              print('Tor check failed (non-fatal):', e)
+          "
 
       - name: Install Python deps
-        run: pip install playwright pdfplumber "requests[socks]" PySocks fake-useragent beautifulsoup4
+        run: pip install playwright pdfplumber "requests[socks]" PySocks beautifulsoup4
 
       - name: Install Playwright browsers
         run: |
