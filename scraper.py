@@ -16,6 +16,11 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")
 SERPAPI_URL = "https://serpapi.com/search"
 
+TOR_PROXIES = {
+    "http": "socks5h://127.0.0.1:9050",
+    "https": "socks5h://127.0.0.1:9050",
+}
+
 QUERIES = [
     'site:saflii.org "Gauteng" "murder" "accused" "convicted" filetype:pdf',
     'site:saflii.org "Western Cape" "murder" "life imprisonment" filetype:pdf',
@@ -28,8 +33,6 @@ QUERIES = [
     'site:saflii.org "rape" "murder" "Gauteng" "life imprisonment" filetype:pdf',
 ]
 
-
-# ── Search ────────────────────────────────────────────────────────────────────
 
 def serpapi_search(query: str, api_key: str, max_results: int = 20) -> list[str]:
     params = {
@@ -44,31 +47,24 @@ def serpapi_search(query: str, api_key: str, max_results: int = 20) -> list[str]
         r = requests.get(SERPAPI_URL, params=params, timeout=20)
         r.raise_for_status()
         data = r.json()
-
         results = data.get("organic_results", [])
         log.info(f"SerpAPI returned {len(results)} results for: {query!r}")
-
         urls = []
         for item in results:
             url = item.get("link", "")
             if "saflii.org" in url and url.endswith(".pdf"):
                 log.info(f"  Found PDF: {url}")
                 urls.append(url)
-
         if not urls:
             for item in results[:5]:
                 log.info(f"  [non-match] {item.get('link','')!r} — {item.get('title','')!r}")
-
         return urls
-
     except requests.HTTPError as e:
         log.error(f"SerpAPI HTTP error: {e.response.status_code} — {e.response.text[:200]}")
     except Exception as e:
         log.error(f"SerpAPI search error: {e}")
     return []
 
-
-# ── PDF download ──────────────────────────────────────────────────────────────
 
 HEADERS = {
     "User-Agent": (
@@ -81,18 +77,23 @@ HEADERS = {
 
 
 def download_pdf(url: str) -> bytes | None:
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=30, verify=False)
-        if r.status_code == 200 and r.content[:4] == b"%PDF":
-            log.info(f"✓ Downloaded {url} ({len(r.content)//1024} KB)")
-            return r.content
-        log.warning(f"Download failed: HTTP {r.status_code} for {url}")
-    except Exception as e:
-        log.warning(f"Download error for {url}: {e}")
+    # Try Tor first
+    for attempt, (label, kwargs) in enumerate([
+        ("Tor", {"proxies": TOR_PROXIES, "timeout": 45, "verify": False}),
+        ("direct", {"timeout": 30, "verify": False}),
+    ]):
+        try:
+            r = requests.get(url, headers=HEADERS, **kwargs)
+            if r.status_code == 200 and r.content[:4] == b"%PDF":
+                log.info(f"✓ [{label}] Downloaded {url} ({len(r.content)//1024} KB)")
+                return r.content
+            log.warning(f"[{label}] HTTP {r.status_code} for {url}")
+            if r.status_code != 403:
+                break  # non-403 won't be fixed by switching proxy
+        except Exception as e:
+            log.warning(f"[{label}] Download error for {url}: {e}")
     return None
 
-
-# ── PDF parsing ───────────────────────────────────────────────────────────────
 
 def extract_pdf_text(pdf_bytes: bytes) -> str:
     text = ""
@@ -184,11 +185,9 @@ def save_case(case: dict):
     log.info(f"Saved → {path}")
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-
 def run(queries=None):
     if not SERPAPI_KEY:
-        raise RuntimeError("SERPAPI_KEY not set. Add it as a GitHub Actions secret.")
+        raise RuntimeError("SERPAPI_KEY not set.")
 
     queries = queries or QUERIES
     all_urls: set[str] = set()
