@@ -5,6 +5,7 @@ from pathlib import Path
 from datetime import datetime
 from time import sleep
 from random import uniform
+from weasyprint import HTML as WeasyprintHTML
 
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -16,9 +17,13 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")
 SERPAPI_URL = "https://serpapi.com/search"
 
-TOR_PROXIES = {
-    "http": "socks5h://127.0.0.1:9050",
-    "https": "socks5h://127.0.0.1:9050",
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://www.saflii.org/",
+    "Accept": "text/html,application/xhtml+xml,*/*",
 }
 
 QUERIES = [
@@ -49,15 +54,19 @@ def serpapi_search(query: str, api_key: str, max_results: int = 20) -> list[str]
         data = r.json()
         results = data.get("organic_results", [])
         log.info(f"SerpAPI returned {len(results)} results for: {query!r}")
+
         urls = []
         for item in results:
             url = item.get("link", "")
-            if "saflii.org" in url and url.endswith(".pdf"):
-                log.info(f"  Found PDF: {url}")
+            if "saflii.org" not in url:
+                continue
+            # collect both .pdf and .html links, normalise to .html
+            if url.endswith(".pdf"):
+                url = url[:-4] + ".html"
+            if url.endswith(".html"):
+                log.info(f"  Found case: {url}")
                 urls.append(url)
-        if not urls:
-            for item in results[:5]:
-                log.info(f"  [non-match] {item.get('link','')!r} — {item.get('title','')!r}")
+
         return urls
     except requests.HTTPError as e:
         log.error(f"SerpAPI HTTP error: {e.response.status_code} — {e.response.text[:200]}")
@@ -66,36 +75,23 @@ def serpapi_search(query: str, api_key: str, max_results: int = 20) -> list[str]
     return []
 
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Referer": "https://www.saflii.org/",
-    "Accept": "application/pdf,*/*",
-}
-
-
-def download_pdf(url: str) -> bytes | None:
-    # Try Tor first
-    for attempt, (label, kwargs) in enumerate([
-        ("Tor", {"proxies": TOR_PROXIES, "timeout": 45, "verify": False}),
-        ("direct", {"timeout": 30, "verify": False}),
-    ]):
-        try:
-            r = requests.get(url, headers=HEADERS, **kwargs)
-            if r.status_code == 200 and r.content[:4] == b"%PDF":
-                log.info(f"✓ [{label}] Downloaded {url} ({len(r.content)//1024} KB)")
-                return r.content
-            log.warning(f"[{label}] HTTP {r.status_code} for {url}")
-            if r.status_code != 403:
-                break  # non-403 won't be fixed by switching proxy
-        except Exception as e:
-            log.warning(f"[{label}] Download error for {url}: {e}")
+def fetch_html(url: str) -> str | None:
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        if r.status_code == 200:
+            log.info(f"✓ Fetched HTML {url} ({len(r.content)//1024} KB)")
+            return r.text
+        log.warning(f"HTML fetch failed: HTTP {r.status_code} for {url}")
+    except Exception as e:
+        log.warning(f"HTML fetch error for {url}: {e}")
     return None
 
 
-def extract_pdf_text(pdf_bytes: bytes) -> str:
+def html_to_pdf_bytes(html: str, base_url: str) -> bytes:
+    return WeasyprintHTML(string=html, base_url=base_url).write_pdf()
+
+
+def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
     text = ""
     try:
         with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
@@ -106,6 +102,13 @@ def extract_pdf_text(pdf_bytes: bytes) -> str:
     except Exception as e:
         log.warning(f"PDF extract error: {e}")
     return text.strip()
+
+
+def extract_text_from_html(html: str) -> str:
+    # Strip tags for plain text fallback
+    clean = re.sub(r"<[^>]+>", " ", html)
+    clean = re.sub(r"\s+", " ", clean)
+    return clean.strip()
 
 
 def parse_case(text: str, url: str) -> dict:
@@ -173,12 +176,12 @@ def parse_case(text: str, url: str) -> dict:
 
 
 def already_scraped(url: str) -> bool:
-    safe = re.sub(r"[^\w]", "_", url.split("/")[-1])
+    safe = re.sub(r"[^\w]", "_", url.rstrip("/").split("/")[-1].replace(".html", ""))
     return (OUTPUT_DIR / f"{safe}.json").exists()
 
 
 def save_case(case: dict):
-    safe = re.sub(r"[^\w]", "_", case.get("case_number") or case["url"].split("/")[-1])
+    safe = re.sub(r"[^\w]", "_", case.get("case_number") or case["url"].rstrip("/").split("/")[-1])
     path = OUTPUT_DIR / f"{safe}.json"
     with open(path, "w", encoding="utf-8") as f:
         json.dump(case, f, ensure_ascii=False, indent=2)
@@ -199,18 +202,26 @@ def run(queries=None):
         log.info(f"Running total: {len(all_urls)} URLs")
         sleep(uniform(1, 2))
 
-    log.info(f"Total unique PDFs found: {len(all_urls)}")
+    log.info(f"Total unique cases found: {len(all_urls)}")
 
     for url in sorted(all_urls):
         if already_scraped(url):
             log.info(f"Skip (already scraped): {url}")
             continue
 
-        pdf = download_pdf(url)
-        if not pdf:
+        html = fetch_html(url)
+        if not html:
             continue
 
-        text = extract_pdf_text(pdf)
+        # Try HTML→PDF→text first for clean extraction, fall back to raw HTML strip
+        try:
+            pdf_bytes = html_to_pdf_bytes(html, base_url=url)
+            text = extract_text_from_pdf_bytes(pdf_bytes)
+            log.info(f"  Extracted {len(text)} chars via HTML→PDF")
+        except Exception as e:
+            log.warning(f"  WeasyPrint failed ({e}), falling back to HTML strip")
+            text = extract_text_from_html(html)
+
         if not text:
             log.warning(f"No text extracted from {url}")
             continue

@@ -21,15 +21,11 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Tor
-        run: |
-          sudo apt-get install -y tor
-          sudo service tor start
-          sleep 5
-          curl --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip || echo "Tor check failed but continuing"
+      - name: Install system deps for WeasyPrint
+        run: sudo apt-get install -y libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b
 
-      - name: Install dependencies
-        run: pip install pdfplumber requests[socks] PySocks
+      - name: Install Python deps
+        run: pip install pdfplumber requests weasyprint
 
       - name: Run scraper
         env:
