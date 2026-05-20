@@ -23,18 +23,11 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y tor
-          # GH Actions has no systemd ? start tor directly as a process
-          sudo tor --RunAsDaemon 1 --Log "notice file /tmp/tor.log"
-          echo "Waiting for Tor to bootstrap..."
-          for i in $(seq 1 24); do
-            sleep 5
-            if grep -q "Bootstrapped 100%" /tmp/tor.log 2>/dev/null; then
-              echo "Tor bootstrapped after $((i*5))s"
-              break
-            fi
-            echo "  ...${i}/${24} waiting"
-          done
-          cat /tmp/tor.log | tail -5
+
+      - name: Start Tor
+        run: |
+          sudo service tor restart
+          sleep 15
 
       - name: Verify Tor
         run: |
