@@ -1,4 +1,4 @@
-import re, json, logging, warnings
+import re, json, logging, warnings, os
 import pdfplumber, requests
 from io import BytesIO
 from pathlib import Path
@@ -13,8 +13,8 @@ log = logging.getLogger(__name__)
 OUTPUT_DIR = Path("cases")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-BRAVE_API_KEY = None  # set via env: BRAVE_API_KEY
-BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
+SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")
+SERPAPI_URL = "https://serpapi.com/search"
 
 QUERIES = [
     'site:saflii.org "Gauteng" "murder" "accused" "convicted" filetype:pdf',
@@ -31,46 +31,40 @@ QUERIES = [
 
 # ── Search ────────────────────────────────────────────────────────────────────
 
-def brave_search(query: str, api_key: str, max_results: int = 20) -> list[str]:
-    """Return saflii.org PDF URLs matching the query via Brave Search API."""
-    headers = {
-        "Accept": "application/json",
-        "Accept-Encoding": "gzip",
-        "X-Subscription-Token": api_key,
-    }
+def serpapi_search(query: str, api_key: str, max_results: int = 20) -> list[str]:
     params = {
+        "engine": "google",
         "q": query,
-        "count": max_results,
-        "search_lang": "en",
-        "country": "ZA",
-        "safesearch": "off",
+        "num": max_results,
+        "gl": "za",
+        "hl": "en",
+        "api_key": api_key,
     }
     try:
-        r = requests.get(BRAVE_SEARCH_URL, headers=headers, params=params, timeout=15)
+        r = requests.get(SERPAPI_URL, params=params, timeout=20)
         r.raise_for_status()
         data = r.json()
 
-        results = data.get("web", {}).get("results", [])
-        log.info(f"Brave returned {len(results)} results for: {query!r}")
+        results = data.get("organic_results", [])
+        log.info(f"SerpAPI returned {len(results)} results for: {query!r}")
 
         urls = []
         for item in results:
-            url = item.get("url", "")
+            url = item.get("link", "")
             if "saflii.org" in url and url.endswith(".pdf"):
                 log.info(f"  Found PDF: {url}")
                 urls.append(url)
 
         if not urls:
-            # Log titles so we can see what DID come back
             for item in results[:5]:
-                log.info(f"  [non-match] {item.get('url','')!r} — {item.get('title','')!r}")
+                log.info(f"  [non-match] {item.get('link','')!r} — {item.get('title','')!r}")
 
         return urls
 
     except requests.HTTPError as e:
-        log.error(f"Brave API HTTP error: {e.response.status_code} — {e.response.text[:200]}")
+        log.error(f"SerpAPI HTTP error: {e.response.status_code} — {e.response.text[:200]}")
     except Exception as e:
-        log.error(f"Brave search error: {e}")
+        log.error(f"SerpAPI search error: {e}")
     return []
 
 
@@ -193,28 +187,21 @@ def save_case(case: dict):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def run(queries=None):
-    import os
-    api_key = BRAVE_API_KEY or os.environ.get("BRAVE_API_KEY", "")
-    if not api_key:
-        raise RuntimeError(
-            "BRAVE_API_KEY not set. "
-            "Get a free key at https://api.search.brave.com — 2,000 queries/month free."
-        )
+    if not SERPAPI_KEY:
+        raise RuntimeError("SERPAPI_KEY not set. Add it as a GitHub Actions secret.")
 
     queries = queries or QUERIES
     all_urls: set[str] = set()
 
-    # ── Search ──
-    log.info("=== Searching via Brave Search API ===")
+    log.info("=== Searching via SerpAPI ===")
     for query in queries:
-        found = brave_search(query, api_key)
+        found = serpapi_search(query, SERPAPI_KEY)
         all_urls.update(found)
         log.info(f"Running total: {len(all_urls)} URLs")
-        sleep(uniform(1, 2))  # stay well within rate limits
+        sleep(uniform(1, 2))
 
     log.info(f"Total unique PDFs found: {len(all_urls)}")
 
-    # ── Download + parse ──
     for url in sorted(all_urls):
         if already_scraped(url):
             log.info(f"Skip (already scraped): {url}")
