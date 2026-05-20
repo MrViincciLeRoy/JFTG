@@ -1,71 +1,65 @@
-import os
-import re
-import json
-import time
-import random
-import logging
-import asyncio
-import pdfplumber
-import requests
-import warnings
-warnings.filterwarnings("ignore")
-
+import os, re, json, time, random, logging, asyncio, warnings
+import pdfplumber, requests
 from io import BytesIO
 from pathlib import Path
 from datetime import datetime
 from playwright.async_api import async_playwright
 
+warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
 OUTPUT_DIR = Path("cases")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# --- Config ---
-TOR_PROXY = "socks5://127.0.0.1:9050"   # Tor SOCKS5 proxy (run: sudo service tor start)
-USE_TOR = True                            # Set False to run without Tor
+TOR_PROXY  = "socks5://127.0.0.1:9050"   # Windows Tor Browser: port 9150
+USE_TOR    = True
 
 DORK_QUERIES = [
     'site:saflii.org "Gauteng" "murder" "accused" "convicted" filetype:pdf',
     'site:saflii.org "Western Cape" "murder" "life imprisonment" filetype:pdf',
-    'site:saflii.org "KwaZulu-Natal" "murder" "accused" "sentenced" filetype:pdf',
-    'site:saflii.org "Gauteng" "rape" "murder" "convicted" filetype:pdf',
+    'site:saflii.org "KwaZulu-Natal" "murder" "convicted" filetype:pdf',
     'site:saflii.org "premeditated murder" "Gauteng" filetype:pdf',
     'site:saflii.org "serial killer" "South Africa" "convicted" filetype:pdf',
-    'site:saflii.org "Gauteng" "kidnapping" "murder" "life imprisonment" filetype:pdf',
-    'site:saflii.org "Western Cape" "robbery" "murder" "gang" filetype:pdf',
+    'site:saflii.org "Gauteng" "kidnapping" "murder" filetype:pdf',
+    'site:saflii.org "Western Cape" "robbery" "murder" filetype:pdf',
     'site:saflii.org "femicide" "South Africa" "convicted" filetype:pdf',
+    'site:saflii.org "rape" "murder" "Gauteng" "life imprisonment" filetype:pdf',
 ]
 
-DDG_ONION = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion"
-DDG_CLEAR  = "https://duckduckgo.com"
 
+# ── Tor check ────────────────────────────────────────────────────────────────
 
 def is_tor_running() -> bool:
     try:
+        import socks  # noqa — confirms PySocks installed
         r = requests.get(
             "https://check.torproject.org/api/ip",
             proxies={"http": TOR_PROXY, "https": TOR_PROXY},
-            timeout=10,
-            verify=False,
+            timeout=10, verify=False,
         )
         data = r.json()
         if data.get("IsTor"):
-            log.info(f"Tor active — exit IP: {data.get('IP')}")
+            log.info(f"✓ Tor active — exit IP: {data.get('IP')}")
             return True
         log.warning("Tor proxy connected but not routing through Tor")
+        return False
+    except ModuleNotFoundError:
+        log.error("PySocks not installed. Run: pip install requests[socks] PySocks")
         return False
     except Exception as e:
         log.warning(f"Tor check failed: {e}")
         return False
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
 def already_scraped(url: str) -> bool:
     safe = re.sub(r"[^\w]", "_", url.split("/")[-1])
     return (OUTPUT_DIR / f"{safe}.json").exists()
 
 
-def extract_text_from_pdf(pdf_bytes: bytes) -> str:
+def extract_pdf_text(pdf_bytes: bytes) -> str:
     text = ""
     try:
         with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
@@ -82,60 +76,39 @@ def parse_case(text: str, url: str) -> dict:
     case = {
         "url": url,
         "scraped_at": datetime.now().isoformat(),
-        "case_number": "",
-        "court": "",
-        "date": "",
-        "accused": "",
-        "charges": [],
-        "verdict": "",
-        "sentence": "",
-        "province": "",
-        "full_text": text,
-        "summary": "",
+        "case_number": "", "court": "", "date": "",
+        "accused": "", "charges": [], "verdict": "",
+        "sentence": "", "province": "",
+        "full_text": text, "summary": "",
     }
-
     m = re.search(r"CASE\s*NO[:\.]?\s*([A-Z]{1,4}\d+/\d{4})", text, re.I)
-    if m:
-        case["case_number"] = m.group(1)
+    if m: case["case_number"] = m.group(1)
 
-    for court in ["Gauteng Division, Pretoria", "Gauteng Local Division, Johannesburg",
-                  "Western Cape High Court", "KwaZulu-Natal High Court",
-                  "Eastern Cape High Court", "Supreme Court of Appeal",
-                  "South Gauteng High Court"]:
-        if court.lower() in text.lower():
-            case["court"] = court
-            break
+    for c in ["Gauteng Division, Pretoria", "Gauteng Local Division, Johannesburg",
+               "Western Cape High Court", "KwaZulu-Natal High Court",
+               "Eastern Cape High Court", "Supreme Court of Appeal"]:
+        if c.lower() in text.lower(): case["court"] = c; break
 
-    for prov in ["Gauteng", "Western Cape", "KwaZulu-Natal", "Eastern Cape",
-                 "Limpopo", "Mpumalanga", "Northern Cape", "Free State", "North West"]:
-        if prov.lower() in text.lower():
-            case["province"] = prov
-            break
+    for p in ["Gauteng","Western Cape","KwaZulu-Natal","Eastern Cape",
+               "Limpopo","Mpumalanga","Northern Cape","Free State","North West"]:
+        if p.lower() in text.lower(): case["province"] = p; break
 
     m = re.search(r"\band\b\s*\n+([A-Z][A-Z\s]+?)\s+ACCUSED", text)
-    if m:
-        case["accused"] = m.group(1).strip()
+    if m: case["accused"] = m.group(1).strip()
 
     m = re.search(r"DATE[:\s]+(\d{1,2}[\-/]\d{1,2}[\-/]\d{2,4})", text, re.I)
-    if m:
-        case["date"] = m.group(1)
+    if m: case["date"] = m.group(1)
 
-    for charge in ["murder", "rape", "kidnapping", "robbery", "attempted murder",
-                   "assault", "human trafficking", "femicide", "fraud"]:
-        if charge.lower() in text.lower():
-            case["charges"].append(charge)
+    for ch in ["murder","rape","kidnapping","robbery","attempted murder",
+                "assault","human trafficking","femicide","fraud"]:
+        if ch in text.lower(): case["charges"].append(ch)
 
-    if "found guilty" in text.lower():
-        case["verdict"] = "Guilty"
-    elif re.search(r"acquitted|not guilty", text, re.I):
-        case["verdict"] = "Not Guilty"
+    if "found guilty" in text.lower(): case["verdict"] = "Guilty"
+    elif re.search(r"acquitted|not guilty", text, re.I): case["verdict"] = "Not Guilty"
 
-    for pattern in [r"life imprisonment", r"(\d+)\s*years['\s]?\s*imprisonment",
-                    r"sentenced to (\d+) years"]:
-        m = re.search(pattern, text, re.I)
-        if m:
-            case["sentence"] = m.group(0).strip()
-            break
+    for pat in [r"life imprisonment", r"\d+\s*years['\s]?\s*imprisonment"]:
+        m = re.search(pat, text, re.I)
+        if m: case["sentence"] = m.group(0).strip(); break
 
     case["summary"] = text[:1000].replace("\n", " ").strip()
     return case
@@ -149,86 +122,107 @@ def save_case(case: dict):
     log.info(f"Saved → {path}")
 
 
-async def search_ddg(page, query: str, max_results: int = 15) -> list[str]:
-    """Search DuckDuckGo (clearnet) via Playwright and collect SAFLII PDF URLs."""
+# ── Search via Google (Playwright) ────────────────────────────────────────────
+
+async def google_search(page, query: str, max_results: int = 15) -> list[str]:
+    """
+    Use Google via real Chromium browser.
+    Works fine on residential IPs — no CAPTCHA for normal browsing patterns.
+    """
     urls = []
     try:
-        ddg_url = f"{DDG_CLEAR}/?q={query.replace(' ', '+')}&ia=web"
-        await page.goto(ddg_url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(random.randint(2000, 4000))
-
-        links = await page.eval_on_selector_all(
-            "a[href]",
-            "els => els.map(e => e.href)"
+        encoded = query.replace(" ", "+")
+        await page.goto(
+            f"https://www.google.com/search?q={encoded}&num=20",
+            wait_until="domcontentloaded",
+            timeout=30000,
         )
+        # Wait for results to render
+        await page.wait_for_selector("#search", timeout=10000)
+        await page.wait_for_timeout(random.randint(1500, 3000))
+
+        # Google result links are in <a> tags inside #search
+        # The actual URL is the href, but some go through google.com/url?q=
+        links = await page.eval_on_selector_all(
+            "#search a[href]",
+            """els => els.map(e => {
+                let h = e.href;
+                // unwrap google redirect: /url?q=ACTUAL_URL&...
+                if (h.includes('/url?q=')) {
+                    h = decodeURIComponent(h.split('/url?q=')[1].split('&')[0]);
+                }
+                return h;
+            })"""
+        )
+
         for link in links:
             if "saflii.org" in link and link.endswith(".pdf") and link not in urls:
-                urls.append(link)
                 log.info(f"Found: {link}")
+                urls.append(link)
                 if len(urls) >= max_results:
                     break
+
     except Exception as e:
-        log.warning(f"DDG search failed: {e}")
+        log.warning(f"Google search failed for '{query}': {e}")
+
     return urls
 
 
-async def download_pdf_via_tor(url: str) -> bytes | None:
-    """Download PDF through Tor SOCKS5 proxy using requests (sync, in thread)."""
+# ── PDF download via Tor ──────────────────────────────────────────────────────
+
+async def download_via_tor(url: str) -> bytes | None:
     def _fetch():
         try:
-            proxies = {"http": TOR_PROXY, "https": TOR_PROXY}
-            headers = {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; rv:109.0) "
-                    "Gecko/20100101 Firefox/115.0"
-                ),
-                "Accept": "application/pdf,*/*",
-                "Referer": "https://www.saflii.org/",
-            }
-            r = requests.get(url, headers=headers, proxies=proxies,
-                             timeout=30, verify=False)
+            r = requests.get(
+                url,
+                proxies={"http": TOR_PROXY, "https": TOR_PROXY},
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; rv:109.0) Gecko/20100101 Firefox/115.0",
+                    "Accept": "application/pdf,*/*",
+                    "Referer": "https://www.saflii.org/",
+                },
+                timeout=30, verify=False,
+            )
             if r.status_code == 200 and r.content[:4] == b"%PDF":
-                log.info(f"Downloaded via Tor: {url} ({len(r.content)//1024}KB)")
+                log.info(f"✓ Tor download: {url} ({len(r.content)//1024}KB)")
                 return r.content
-            else:
-                log.warning(f"Tor download: HTTP {r.status_code} for {url}")
+            log.warning(f"Tor got HTTP {r.status_code} for {url}")
         except Exception as e:
-            log.warning(f"Tor download failed {url}: {e}")
+            log.warning(f"Tor download error: {e}")
         return None
-
     return await asyncio.to_thread(_fetch)
 
 
-async def download_pdf_browser(page, url: str) -> bytes | None:
-    """Fallback: download PDF through Playwright browser session."""
+async def download_via_browser(page, url: str) -> bytes | None:
     try:
-        response = await page.request.get(
+        resp = await page.request.get(
             url,
             headers={"Accept": "application/pdf,*/*", "Referer": "https://www.saflii.org/"},
             timeout=30000,
         )
-        if response.status == 200:
-            content = await response.body()
-            if content[:4] == b"%PDF":
-                log.info(f"Downloaded via browser: {url} ({len(content)//1024}KB)")
-                return content
+        if resp.status == 200:
+            body = await resp.body()
+            if body[:4] == b"%PDF":
+                log.info(f"✓ Browser download: {url} ({len(body)//1024}KB)")
+                return body
     except Exception as e:
-        log.warning(f"Browser download failed {url}: {e}")
+        log.warning(f"Browser download error: {e}")
     return None
 
 
-async def run_async(queries: list[str] = None, max_per_query: int = 15):
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+async def run_async(queries=None, max_per_query=15):
     queries = queries or DORK_QUERIES
 
     tor_ok = False
     if USE_TOR:
-        log.info("Checking Tor connection...")
+        log.info("Checking Tor...")
         tor_ok = is_tor_running()
-        if tor_ok:
-            log.info("Tor is active — SAFLII downloads will route through Tor")
-        else:
-            log.warning("Tor not available — falling back to direct browser download")
-            log.warning("To enable Tor: sudo apt install tor && sudo service tor start")
+        if not tor_ok:
+            log.warning("Tor unavailable — will use direct browser for downloads")
+            log.warning("Linux:   sudo apt install tor && sudo service tor start")
+            log.warning("Windows: open Tor Browser, change TOR_PROXY port to 9150")
 
     all_urls: set[str] = set()
 
@@ -237,61 +231,54 @@ async def run_async(queries: list[str] = None, max_per_query: int = 15):
             headless=True,
             args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
         )
-        context = await browser.new_context(
+        ctx = await browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             ),
-            viewport={"width": 1280, "height": 800},
+            viewport={"width": 1366, "height": 768},
             locale="en-ZA",
         )
-        page = await context.new_page()
+        page = await ctx.new_page()
         await page.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
         )
 
-        # --- Step 1: Search DuckDuckGo ---
-        log.info("=== Searching DuckDuckGo for SAFLII cases ===")
+        # ── Search ──
+        log.info("=== Searching Google for SAFLII cases ===")
         for query in queries:
-            urls = await search_ddg(page, query, max_per_query)
-            all_urls.update(urls)
-            await asyncio.sleep(random.uniform(3, 7))
+            found = await google_search(page, query, max_per_query)
+            all_urls.update(found)
+            log.info(f"Running total: {len(all_urls)} URLs")
+            await asyncio.sleep(random.uniform(4, 9))  # human-like delay between searches
 
-        log.info(f"Total unique PDFs found: {len(all_urls)}")
+        log.info(f"Total unique PDFs: {len(all_urls)}")
 
-        # --- Step 2: Download each PDF ---
-        for url in all_urls:
+        # ── Download + parse ──
+        for url in sorted(all_urls):
             if already_scraped(url):
-                log.info(f"Skip (done): {url}")
+                log.info(f"Skip: {url}")
                 continue
 
-            # Try Tor first, fall back to browser
-            if tor_ok:
-                pdf_bytes = await download_pdf_via_tor(url)
-            else:
-                pdf_bytes = await download_pdf_browser(page, url)
-
-            if not pdf_bytes:
-                log.warning(f"Could not download: {url}")
+            pdf = await download_via_tor(url) if tor_ok else await download_via_browser(page, url)
+            if not pdf:
                 continue
 
-            text = extract_text_from_pdf(pdf_bytes)
+            text = extract_pdf_text(pdf)
             if not text:
-                log.warning(f"Empty text: {url}")
+                log.warning(f"No text from {url}")
                 continue
 
             case = parse_case(text, url)
             save_case(case)
-
-            await asyncio.sleep(random.uniform(3, 8))
+            await asyncio.sleep(random.uniform(3, 7))
 
         await browser.close()
 
-    log.info(f"Done. All cases saved to ./{OUTPUT_DIR}/")
+    log.info(f"Done. Cases in ./{OUTPUT_DIR}/")
 
 
-def run(queries: list[str] = None):
+def run(queries=None):
     asyncio.run(run_async(queries))
 
 
