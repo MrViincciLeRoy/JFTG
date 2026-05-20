@@ -29,6 +29,9 @@ jobs:
           sudo service tor restart
           sleep 15
 
+      - name: Install Python deps
+        run: pip install playwright pdfplumber "requests[socks]" PySocks beautifulsoup4
+
       - name: Verify Tor
         run: |
           python3 -c "
@@ -45,9 +48,6 @@ jobs:
           except Exception as e:
               print('Tor check failed (non-fatal):', e)
           "
-
-      - name: Install Python deps
-        run: pip install playwright pdfplumber "requests[socks]" PySocks beautifulsoup4
 
       - name: Install Playwright browsers
         run: |
