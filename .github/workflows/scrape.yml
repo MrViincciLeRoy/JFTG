@@ -1,0 +1,50 @@
+name: SAFLII Crime Scraper
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"   # every Monday 3AM UTC
+  workflow_dispatch:        # manual trigger from GH Actions tab
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Tor
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y tor
+          sudo service tor start
+          sleep 5
+          # Verify Tor is running
+          curl --socks5 127.0.0.1:9050 --socks5-hostname 127.0.0.1:9050 \
+            -s https://check.torproject.org/api/ip | python3 -c \
+            "import sys,json; d=json.load(sys.stdin); print('Tor active:', d.get('IsTor'), '| Exit IP:', d.get('IP'))"
+
+      - name: Install Python deps
+        run: |
+          pip install playwright pdfplumber requests fake-useragent
+
+      - name: Install Playwright browsers
+        run: |
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Run scraper
+        run: python scraper.py
+
+      - name: Upload case JSONs
+        uses: actions/upload-artifact@v4
+        with:
+          name: saflii-cases-${{ github.run_number }}
+          path: cases/
+          retention-days: 90
