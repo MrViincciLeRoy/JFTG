@@ -1,0 +1,38 @@
+name: Test SAFLII Scraper
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install requests beautifulsoup4
+
+      - name: Run scraper
+        run: python scraper.py
+
+      - name: Check output file exists
+        run: |
+          if [ ! -f judgment.txt ]; then
+            echo "judgment.txt not found"
+            exit 1
+          fi
+          echo "judgment.txt created — $(wc -c < judgment.txt) bytes"
+
+      - name: Upload judgment artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: judgment
+          path: judgment.txt
