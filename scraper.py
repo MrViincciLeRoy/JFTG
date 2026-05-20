@@ -1,9 +1,10 @@
-import os, re, json, time, random, logging, asyncio, warnings
+import re, json, logging, warnings
 import pdfplumber, requests
 from io import BytesIO
 from pathlib import Path
 from datetime import datetime
-from playwright.async_api import async_playwright
+from time import sleep
+from random import uniform
 
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -12,10 +13,10 @@ log = logging.getLogger(__name__)
 OUTPUT_DIR = Path("cases")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-TOR_PROXY  = "socks5://127.0.0.1:9050"   # Windows Tor Browser: port 9150
-USE_TOR    = True
+BRAVE_API_KEY = None  # set via env: BRAVE_API_KEY
+BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 
-DORK_QUERIES = [
+QUERIES = [
     'site:saflii.org "Gauteng" "murder" "accused" "convicted" filetype:pdf',
     'site:saflii.org "Western Cape" "murder" "life imprisonment" filetype:pdf',
     'site:saflii.org "KwaZulu-Natal" "murder" "convicted" filetype:pdf',
@@ -28,36 +29,76 @@ DORK_QUERIES = [
 ]
 
 
-# ── Tor check ────────────────────────────────────────────────────────────────
+# ── Search ────────────────────────────────────────────────────────────────────
 
-def is_tor_running() -> bool:
+def brave_search(query: str, api_key: str, max_results: int = 20) -> list[str]:
+    """Return saflii.org PDF URLs matching the query via Brave Search API."""
+    headers = {
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip",
+        "X-Subscription-Token": api_key,
+    }
+    params = {
+        "q": query,
+        "count": max_results,
+        "search_lang": "en",
+        "country": "ZA",
+        "safesearch": "off",
+    }
     try:
-        import socks  # noqa — confirms PySocks installed
-        r = requests.get(
-            "https://check.torproject.org/api/ip",
-            proxies={"http": TOR_PROXY, "https": TOR_PROXY},
-            timeout=10, verify=False,
-        )
+        r = requests.get(BRAVE_SEARCH_URL, headers=headers, params=params, timeout=15)
+        r.raise_for_status()
         data = r.json()
-        if data.get("IsTor"):
-            log.info(f"✓ Tor active — exit IP: {data.get('IP')}")
-            return True
-        log.warning("Tor proxy connected but not routing through Tor")
-        return False
-    except ModuleNotFoundError:
-        log.error("PySocks not installed. Run: pip install requests[socks] PySocks")
-        return False
+
+        results = data.get("web", {}).get("results", [])
+        log.info(f"Brave returned {len(results)} results for: {query!r}")
+
+        urls = []
+        for item in results:
+            url = item.get("url", "")
+            if "saflii.org" in url and url.endswith(".pdf"):
+                log.info(f"  Found PDF: {url}")
+                urls.append(url)
+
+        if not urls:
+            # Log titles so we can see what DID come back
+            for item in results[:5]:
+                log.info(f"  [non-match] {item.get('url','')!r} — {item.get('title','')!r}")
+
+        return urls
+
+    except requests.HTTPError as e:
+        log.error(f"Brave API HTTP error: {e.response.status_code} — {e.response.text[:200]}")
     except Exception as e:
-        log.warning(f"Tor check failed: {e}")
-        return False
+        log.error(f"Brave search error: {e}")
+    return []
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── PDF download ──────────────────────────────────────────────────────────────
 
-def already_scraped(url: str) -> bool:
-    safe = re.sub(r"[^\w]", "_", url.split("/")[-1])
-    return (OUTPUT_DIR / f"{safe}.json").exists()
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://www.saflii.org/",
+    "Accept": "application/pdf,*/*",
+}
 
+
+def download_pdf(url: str) -> bytes | None:
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30, verify=False)
+        if r.status_code == 200 and r.content[:4] == b"%PDF":
+            log.info(f"✓ Downloaded {url} ({len(r.content)//1024} KB)")
+            return r.content
+        log.warning(f"Download failed: HTTP {r.status_code} for {url}")
+    except Exception as e:
+        log.warning(f"Download error for {url}: {e}")
+    return None
+
+
+# ── PDF parsing ───────────────────────────────────────────────────────────────
 
 def extract_pdf_text(pdf_bytes: bytes) -> str:
     text = ""
@@ -81,37 +122,64 @@ def parse_case(text: str, url: str) -> dict:
         "sentence": "", "province": "",
         "full_text": text, "summary": "",
     }
+
     m = re.search(r"CASE\s*NO[:\.]?\s*([A-Z]{1,4}\d+/\d{4})", text, re.I)
-    if m: case["case_number"] = m.group(1)
+    if m:
+        case["case_number"] = m.group(1)
 
-    for c in ["Gauteng Division, Pretoria", "Gauteng Local Division, Johannesburg",
-               "Western Cape High Court", "KwaZulu-Natal High Court",
-               "Eastern Cape High Court", "Supreme Court of Appeal"]:
-        if c.lower() in text.lower(): case["court"] = c; break
+    for c in [
+        "Gauteng Division, Pretoria",
+        "Gauteng Local Division, Johannesburg",
+        "Western Cape High Court",
+        "KwaZulu-Natal High Court",
+        "Eastern Cape High Court",
+        "Supreme Court of Appeal",
+    ]:
+        if c.lower() in text.lower():
+            case["court"] = c
+            break
 
-    for p in ["Gauteng","Western Cape","KwaZulu-Natal","Eastern Cape",
-               "Limpopo","Mpumalanga","Northern Cape","Free State","North West"]:
-        if p.lower() in text.lower(): case["province"] = p; break
+    for p in [
+        "Gauteng", "Western Cape", "KwaZulu-Natal", "Eastern Cape",
+        "Limpopo", "Mpumalanga", "Northern Cape", "Free State", "North West",
+    ]:
+        if p.lower() in text.lower():
+            case["province"] = p
+            break
 
     m = re.search(r"\band\b\s*\n+([A-Z][A-Z\s]+?)\s+ACCUSED", text)
-    if m: case["accused"] = m.group(1).strip()
+    if m:
+        case["accused"] = m.group(1).strip()
 
     m = re.search(r"DATE[:\s]+(\d{1,2}[\-/]\d{1,2}[\-/]\d{2,4})", text, re.I)
-    if m: case["date"] = m.group(1)
+    if m:
+        case["date"] = m.group(1)
 
-    for ch in ["murder","rape","kidnapping","robbery","attempted murder",
-                "assault","human trafficking","femicide","fraud"]:
-        if ch in text.lower(): case["charges"].append(ch)
+    for ch in [
+        "murder", "rape", "kidnapping", "robbery", "attempted murder",
+        "assault", "human trafficking", "femicide", "fraud",
+    ]:
+        if ch in text.lower():
+            case["charges"].append(ch)
 
-    if "found guilty" in text.lower(): case["verdict"] = "Guilty"
-    elif re.search(r"acquitted|not guilty", text, re.I): case["verdict"] = "Not Guilty"
+    if "found guilty" in text.lower():
+        case["verdict"] = "Guilty"
+    elif re.search(r"acquitted|not guilty", text, re.I):
+        case["verdict"] = "Not Guilty"
 
     for pat in [r"life imprisonment", r"\d+\s*years['\s]?\s*imprisonment"]:
         m = re.search(pat, text, re.I)
-        if m: case["sentence"] = m.group(0).strip(); break
+        if m:
+            case["sentence"] = m.group(0).strip()
+            break
 
     case["summary"] = text[:1000].replace("\n", " ").strip()
     return case
+
+
+def already_scraped(url: str) -> bool:
+    safe = re.sub(r"[^\w]", "_", url.split("/")[-1])
+    return (OUTPUT_DIR / f"{safe}.json").exists()
 
 
 def save_case(case: dict):
@@ -122,171 +190,50 @@ def save_case(case: dict):
     log.info(f"Saved → {path}")
 
 
-# ── Search via DuckDuckGo HTML (no JS, no CAPTCHA) ───────────────────────────
-# Google detects headless Chromium on CI IPs and serves a consent/bot page.
-# DuckDuckGo's plain-HTML endpoint works reliably without JavaScript.
-
-async def ddg_search(page, query: str, max_results: int = 15) -> list[str]:
-    urls = []
-    try:
-        encoded = requests.utils.quote(query)
-        url = f"https://html.duckduckgo.com/html/?q={encoded}"
-        log.info(f"DDG search: {url}")
-
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(random.randint(1500, 2500))
-
-        # ── DEBUG: dump first 3000 chars of page so we can see what arrived ──
-        content = await page.content()
-        log.info(f"[DEBUG] Page title: {await page.title()!r}")
-        log.info(f"[DEBUG] Page HTML snippet (first 3000 chars):\n{content[:3000]}")
-
-        # DDG HTML result links are <a class="result__a" href="...">
-        # The href is a redirect: /l/?uddg=ENCODED_REAL_URL&...
-        links = await page.eval_on_selector_all(
-            "a.result__a",
-            """els => els.map(e => {
-                let h = e.href;
-                // unwrap DDG redirect /l/?uddg=...
-                try {
-                    const u = new URL(h);
-                    const uddg = u.searchParams.get('uddg');
-                    if (uddg) return decodeURIComponent(uddg);
-                } catch(_) {}
-                return h;
-            })"""
-        )
-
-        log.info(f"[DEBUG] Raw links found ({len(links)}): {links[:10]}")
-
-        for link in links:
-            if "saflii.org" in link and link.endswith(".pdf") and link not in urls:
-                log.info(f"Found: {link}")
-                urls.append(link)
-                if len(urls) >= max_results:
-                    break
-
-        if not urls:
-            log.warning(f"No saflii PDF links found for query: {query!r}")
-
-    except Exception as e:
-        log.warning(f"DDG search failed for '{query}': {e}")
-
-    return urls
-
-
-# ── PDF download via Tor ──────────────────────────────────────────────────────
-
-async def download_via_tor(url: str) -> bytes | None:
-    def _fetch():
-        try:
-            r = requests.get(
-                url,
-                proxies={"http": TOR_PROXY, "https": TOR_PROXY},
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; rv:109.0) Gecko/20100101 Firefox/115.0",
-                    "Accept": "application/pdf,*/*",
-                    "Referer": "https://www.saflii.org/",
-                },
-                timeout=30, verify=False,
-            )
-            if r.status_code == 200 and r.content[:4] == b"%PDF":
-                log.info(f"✓ Tor download: {url} ({len(r.content)//1024}KB)")
-                return r.content
-            log.warning(f"Tor got HTTP {r.status_code} for {url}")
-        except Exception as e:
-            log.warning(f"Tor download error: {e}")
-        return None
-    return await asyncio.to_thread(_fetch)
-
-
-async def download_via_browser(page, url: str) -> bytes | None:
-    try:
-        resp = await page.request.get(
-            url,
-            headers={"Accept": "application/pdf,*/*", "Referer": "https://www.saflii.org/"},
-            timeout=30000,
-        )
-        if resp.status == 200:
-            body = await resp.body()
-            if body[:4] == b"%PDF":
-                log.info(f"✓ Browser download: {url} ({len(body)//1024}KB)")
-                return body
-    except Exception as e:
-        log.warning(f"Browser download error: {e}")
-    return None
-
-
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-async def run_async(queries=None, max_per_query=15):
-    queries = queries or DORK_QUERIES
+def run(queries=None):
+    import os
+    api_key = BRAVE_API_KEY or os.environ.get("BRAVE_API_KEY", "")
+    if not api_key:
+        raise RuntimeError(
+            "BRAVE_API_KEY not set. "
+            "Get a free key at https://api.search.brave.com — 2,000 queries/month free."
+        )
 
-    tor_ok = False
-    if USE_TOR:
-        log.info("Checking Tor...")
-        tor_ok = is_tor_running()
-        if not tor_ok:
-            log.warning("Tor unavailable — will use direct browser for downloads")
-            log.warning("Linux:   sudo apt install tor && sudo service tor start")
-            log.warning("Windows: open Tor Browser, change TOR_PROXY port to 9150")
-
+    queries = queries or QUERIES
     all_urls: set[str] = set()
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-        )
-        ctx = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1366, "height": 768},
-            locale="en-ZA",
-        )
-        page = await ctx.new_page()
-        await page.add_init_script(
-            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
-        )
+    # ── Search ──
+    log.info("=== Searching via Brave Search API ===")
+    for query in queries:
+        found = brave_search(query, api_key)
+        all_urls.update(found)
+        log.info(f"Running total: {len(all_urls)} URLs")
+        sleep(uniform(1, 2))  # stay well within rate limits
 
-        # ── Search ──
-        log.info("=== Searching DuckDuckGo for SAFLII cases ===")
-        for query in queries:
-            found = await ddg_search(page, query, max_per_query)
-            all_urls.update(found)
-            log.info(f"Running total: {len(all_urls)} URLs")
-            await asyncio.sleep(random.uniform(3, 6))
+    log.info(f"Total unique PDFs found: {len(all_urls)}")
 
-        log.info(f"Total unique PDFs: {len(all_urls)}")
+    # ── Download + parse ──
+    for url in sorted(all_urls):
+        if already_scraped(url):
+            log.info(f"Skip (already scraped): {url}")
+            continue
 
-        # ── Download + parse ──
-        for url in sorted(all_urls):
-            if already_scraped(url):
-                log.info(f"Skip: {url}")
-                continue
+        pdf = download_pdf(url)
+        if not pdf:
+            continue
 
-            pdf = await download_via_tor(url) if tor_ok else await download_via_browser(page, url)
-            if not pdf:
-                continue
+        text = extract_pdf_text(pdf)
+        if not text:
+            log.warning(f"No text extracted from {url}")
+            continue
 
-            text = extract_pdf_text(pdf)
-            if not text:
-                log.warning(f"No text from {url}")
-                continue
+        case = parse_case(text, url)
+        save_case(case)
+        sleep(uniform(2, 4))
 
-            case = parse_case(text, url)
-            save_case(case)
-            await asyncio.sleep(random.uniform(3, 7))
-
-        await browser.close()
-
-    log.info(f"Done. Cases in ./{OUTPUT_DIR}/")
-
-
-def run(queries=None):
-    asyncio.run(run_async(queries))
+    log.info(f"Done. Cases saved to ./{OUTPUT_DIR}/")
 
 
 if __name__ == "__main__":
