@@ -5,7 +5,9 @@ import requests
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-from shorts.config import GEMINI_API_KEY, GEMINI_IMAGE_URL, IMAGES_DIR, VIDEO_WIDTH, VIDEO_HEIGHT
+from shorts.config import GEMINI_API_KEY, IMAGES_DIR
+
+GEMINI_IMAGE_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent"
 
 STYLE_PREFIX = (
     "Cinematic, dramatic, photorealistic, dark moody lighting, South African setting, "
