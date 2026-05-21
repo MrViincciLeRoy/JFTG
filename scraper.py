@@ -1,11 +1,10 @@
 import re, json, logging, warnings, os
-from io import BytesIO
 from pathlib import Path
 from datetime import datetime
 from time import sleep
 from random import uniform
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import pdfplumber
 import requests
 from bs4 import BeautifulSoup
 
@@ -25,14 +24,8 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,*/*",
 }
 
-WAYBACK_FALLBACK_TS = [
-    "20260101120000",
-    "20250601120000",
-    "20250101120000",
-    "20240601120000",
-    "20240101120000",
-    "20230101120000",
-]
+# Skip CDX entirely — just try these directly. Recent snapshots work best.
+WAYBACK_TIMESTAMPS = ["20260101120000", "20250601120000", "20240601120000"]
 
 QUERIES = [
     'site:saflii.org "Gauteng" "murder" "accused" "convicted" filetype:pdf',
@@ -46,18 +39,17 @@ QUERIES = [
     'site:saflii.org "rape" "murder" "Gauteng" "life imprisonment" filetype:pdf',
 ]
 
+SESSION = requests.Session()
+SESSION.headers.update(HEADERS)
 
-def serpapi_search(query: str, max_results: int = 20) -> list[str]:
+
+def serpapi_search(query, max_results=10):
     params = {
-        "engine": "google",
-        "q": query,
-        "num": max_results,
-        "gl": "za",
-        "hl": "en",
-        "api_key": SERPAPI_KEY,
+        "engine": "google", "q": query, "num": max_results,
+        "gl": "za", "hl": "en", "api_key": SERPAPI_KEY,
     }
     try:
-        r = requests.get(SERPAPI_URL, params=params, timeout=20)
+        r = SESSION.get(SERPAPI_URL, params=params, timeout=20)
         r.raise_for_status()
         results = r.json().get("organic_results", [])
         log.info(f"SerpAPI: {len(results)} results for {query!r}")
@@ -76,81 +68,41 @@ def serpapi_search(query: str, max_results: int = 20) -> list[str]:
         return []
 
 
-def wayback_snapshot(url: str) -> str | None:
-    cdx = "http://web.archive.org/cdx/search/cdx"
-    params = {
-        "url": url, "output": "json", "limit": 3,
-        "filter": "statuscode:200", "fl": "timestamp",
-        "collapse": "timestamp:8",
-    }
-    try:
-        r = requests.get(cdx, params=params, headers=HEADERS, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-        if len(data) > 1:
-            return data[1][0]
-    except Exception as e:
-        log.warning(f"CDX failed ({e}), probing fallback timestamps...")
-
-    for ts in WAYBACK_FALLBACK_TS:
+def fetch_via_wayback(url):
+    for ts in WAYBACK_TIMESTAMPS:
         try:
-            probe = f"https://web.archive.org/web/{ts}/{url}"
-            r = requests.head(probe, headers=HEADERS, timeout=10, allow_redirects=True)
-            if r.status_code == 200:
-                log.info(f"  Fallback ts {ts} works for {url}")
-                return ts
+            wayback_url = f"https://web.archive.org/web/{ts}id_/{url}"
+            r = SESSION.get(wayback_url, timeout=15)
+            if r.status_code == 200 and len(r.text) > 500:
+                log.info(f"Wayback ({ts}): {url}")
+                return r.text
         except Exception:
             pass
-        sleep(0.3)
+    log.warning(f"No snapshot found: {url}")
     return None
 
 
-def fetch_via_wayback(url: str) -> str | None:
-    ts = wayback_snapshot(url)
-    if not ts:
-        log.warning(f"No Wayback snapshot found for {url}")
-        return None
-    wayback_url = f"https://web.archive.org/web/{ts}id_/{url}"
+def fetch_html(url):
     try:
-        r = requests.get(wayback_url, headers=HEADERS, timeout=30)
-        r.raise_for_status()
-        log.info(f"Fetched via Wayback ({ts}): {url}")
-        return r.text
-    except Exception as e:
-        log.warning(f"Wayback fetch failed: {e}")
-        return None
-
-
-def fetch_direct(url: str) -> str | None:
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
+        r = SESSION.get(url, timeout=12)
         if r.status_code == 200:
-            log.info(f"Fetched direct: {url}")
+            log.info(f"Direct: {url}")
             return r.text
-        log.warning(f"Direct fetch HTTP {r.status_code}: {url}")
+        log.warning(f"Direct {r.status_code}: {url}")
     except Exception as e:
-        log.warning(f"Direct fetch error: {e}")
-    return None
-
-
-def fetch_html(url: str) -> str | None:
-    html = fetch_direct(url)
-    if html:
-        return html
-    log.info(f"Direct blocked, trying Wayback for {url}")
+        log.warning(f"Direct error ({e}): {url}")
     return fetch_via_wayback(url)
 
 
-def parse_text_from_html(html: str) -> str:
+def parse_text_from_html(html):
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "nav", "header", "footer"]):
         tag.decompose()
-    text = soup.get_text(separator="\n", strip=True)
-    lines = [l for l in text.splitlines() if l.strip()]
+    lines = [l for l in soup.get_text(separator="\n", strip=True).splitlines() if l.strip()]
     return "\n".join(lines)
 
 
-def parse_case(text: str, url: str) -> dict:
+def parse_case(text, url):
     case = {
         "url": url,
         "scraped_at": datetime.now().isoformat(),
@@ -173,10 +125,8 @@ def parse_case(text: str, url: str) -> dict:
             case["court"] = c
             break
 
-    for p in [
-        "Gauteng", "Western Cape", "KwaZulu-Natal", "Eastern Cape",
-        "Limpopo", "Mpumalanga", "Northern Cape", "Free State", "North West",
-    ]:
+    for p in ["Gauteng", "Western Cape", "KwaZulu-Natal", "Eastern Cape",
+              "Limpopo", "Mpumalanga", "Northern Cape", "Free State", "North West"]:
         if p.lower() in text.lower():
             case["province"] = p
             break
@@ -209,54 +159,57 @@ def parse_case(text: str, url: str) -> dict:
     return case
 
 
-def case_slug(url: str) -> str:
+def case_slug(url):
     return re.sub(r"[^\w]", "_", url.rstrip("/").split("/")[-1].replace(".html", ""))
 
 
-def already_scraped(url: str) -> bool:
+def already_scraped(url):
     return (OUTPUT_DIR / f"{case_slug(url)}.json").exists()
 
 
-def save_case(case: dict, url: str):
-    slug = case.get("case_number") or case_slug(url)
-    slug = re.sub(r"[^\w]", "_", slug)
+def save_case(case, url):
+    slug = re.sub(r"[^\w]", "_", case.get("case_number") or case_slug(url))
     path = OUTPUT_DIR / f"{slug}.json"
     with open(path, "w", encoding="utf-8") as f:
         json.dump(case, f, ensure_ascii=False, indent=2)
-    log.info(f"Saved → {path}")
+    log.info(f"Saved -> {path}")
+
+
+def process_url(url):
+    if already_scraped(url):
+        log.info(f"Skip (cached): {url}")
+        return
+    html = fetch_html(url)
+    if not html:
+        return
+    text = parse_text_from_html(html)
+    if not text:
+        return
+    case = parse_case(text, url)
+    save_case(case, url)
+    sleep(uniform(1, 2))
 
 
 def run():
     if not SERPAPI_KEY:
         raise RuntimeError("SERPAPI_KEY not set.")
 
-    all_urls: set[str] = set()
+    all_urls = set()
     for query in QUERIES:
-        found = serpapi_search(query)
-        all_urls.update(found)
+        all_urls.update(serpapi_search(query))
         log.info(f"Total URLs so far: {len(all_urls)}")
         sleep(uniform(1, 2))
 
-    log.info(f"Unique cases to process: {len(all_urls)}")
+    to_fetch = [u for u in sorted(all_urls) if not already_scraped(u)]
+    log.info(f"Unique cases to process: {len(to_fetch)}")
 
-    for url in sorted(all_urls):
-        if already_scraped(url):
-            log.info(f"Skip (cached): {url}")
-            continue
-
-        html = fetch_html(url)
-        if not html:
-            log.warning(f"Could not fetch: {url}")
-            continue
-
-        text = parse_text_from_html(html)
-        if not text:
-            log.warning(f"No text from: {url}")
-            continue
-
-        case = parse_case(text, url)
-        save_case(case, url)
-        sleep(uniform(2, 4))
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futures = {ex.submit(process_url, url): url for url in to_fetch}
+        for f in as_completed(futures):
+            try:
+                f.result()
+            except Exception as e:
+                log.error(f"Error processing {futures[f]}: {e}")
 
     log.info(f"Done. Cases in ./{OUTPUT_DIR}/")
 

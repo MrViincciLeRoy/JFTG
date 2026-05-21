@@ -1,0 +1,14 @@
+# Sensitive files
+.shorts_clipper_env
+cookies.txt
+
+# Downloaded content
+downloaded_videos/
+shorts_output/
+cases/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
