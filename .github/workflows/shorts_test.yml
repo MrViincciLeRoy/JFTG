@@ -22,7 +22,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install openai requests
 
       - name: Run Stage 1+2 on all cases
         env:
