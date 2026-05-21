@@ -13,13 +13,20 @@ STYLE_PREFIX = (
 )
 
 
-def generate_images(story: dict, output_dir: str = None) -> list[str]:
+def generate_images(story: dict, case: dict = None, output_dir: str = None) -> list[str]:
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is not set.")
 
     prompts = story.get("image_prompts", [])
     if not prompts:
         raise ValueError("No image_prompts found in story.")
+
+    character_desc = ""
+    if case:
+        from shorts.stages.character import extract_character
+        char = extract_character(story, case)
+        character_desc = char["description"]
+        print(f"      Character: {character_desc}")
 
     slug = story.get("title", "scene").replace(" ", "_")[:40]
     save_dir = Path(output_dir or IMAGES_DIR) / slug
@@ -28,7 +35,8 @@ def generate_images(story: dict, output_dir: str = None) -> list[str]:
     saved_paths = []
 
     for i, prompt in enumerate(prompts):
-        full_prompt = STYLE_PREFIX + prompt
+        char_infix = f"Main character — {character_desc}. " if character_desc else ""
+        full_prompt = STYLE_PREFIX + char_infix + prompt
 
         payload = {
             "contents": [{"parts": [{"text": full_prompt}]}],
