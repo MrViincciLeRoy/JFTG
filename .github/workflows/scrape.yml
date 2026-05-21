@@ -31,6 +31,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add cases/
+          git add -f cases/
           git diff --cached --quiet || git commit -m "scraped cases $(date +'%Y-%m-%d')"
           git push
