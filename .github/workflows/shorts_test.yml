@@ -1,0 +1,46 @@
+name: Shorts Pipeline Test
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'shorts/**'
+      - 'cases/**'
+
+permissions:
+  contents: write
+
+jobs:
+  test-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run Stage 1+2 on all cases
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python shorts/main.py --cases-dir cases/ --stories-dir output/stories/ --stages 1,2
+
+      - name: Show story output sample
+        run: |
+          echo "--- Generated stories ---"
+          ls output/stories/ || echo "No stories generated"
+          echo ""
+          echo "--- Sample story ---"
+          ls output/stories/*.json 2>/dev/null | head -1 | xargs cat || echo "No JSON files yet"
+
+      - name: Commit story outputs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add output/stories/
+          git diff --cached --quiet || git commit -m "stories generated $(date +'%Y-%m-%d')"
+          git push
