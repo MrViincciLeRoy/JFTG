@@ -22,12 +22,12 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install openai requests
+        run: pip install openai requests huggingface_hub pillow
 
       - name: Run Stage 1+2+4 (story + images, no TTS)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          HF_TOKEN_2: ${{ secrets.HF_TOKEN_2 }}
         run: |
           python shorts/main.py \
             --cases-dir cases/ \
@@ -39,7 +39,6 @@ jobs:
         run: |
           echo "--- Stories ---"
           ls output/stories/ 2>/dev/null || echo "none"
-          echo ""
           echo "--- Images ---"
           find output/images/ -name "*.png" 2>/dev/null | head -20 || echo "none"
 
@@ -47,6 +46,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f output/stories/ output/images/
+          git add output/stories/ output/images/
           git diff --cached --quiet || git commit -m "images generated $(date +'%Y-%m-%d')"
           git push
