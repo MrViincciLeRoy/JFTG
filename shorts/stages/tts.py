@@ -10,14 +10,14 @@ def generate_audio(story: dict, output_path: str = None) -> str:
     try:
         from kokoro import KPipeline
     except ImportError:
-        raise ImportError("Install kokoro: pip install kokoro>=0.9.4 soundfile")
+        raise ImportError("Install: pip install kokoro>=0.9.4 soundfile && apt-get install espeak-ng")
 
     import soundfile as sf
     import numpy as np
 
     narration = story.get("narration", "")
     if not narration:
-        raise ValueError("No narration found in story.")
+        raise ValueError("No narration in story.")
 
     Path(AUDIO_DIR).mkdir(parents=True, exist_ok=True)
 
@@ -28,7 +28,7 @@ def generate_audio(story: dict, output_path: str = None) -> str:
     pipeline = KPipeline(lang_code="a")
 
     audio_chunks = []
-    for _, _, audio in pipeline(narration, voice="af_heart", speed=1.0):
+    for _, _, audio in pipeline(narration, voice="am_echo", speed=1.0):
         audio_chunks.append(audio)
 
     full_audio = np.concatenate(audio_chunks)

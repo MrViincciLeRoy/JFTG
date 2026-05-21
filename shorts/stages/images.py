@@ -6,12 +6,8 @@ from time import sleep
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from shorts.config import IMAGES_DIR
 
-HF_TOKENS = [
-    t for t in [
-        os.environ.get("HF_TOKEN", ""),
-        os.environ.get("HF_TOKEN_2", ""),
-    ] if t
-]
+# Images use HF_TOKEN_2 exclusively — keeps it separate from LLM quota
+HF_TOKEN_2 = os.environ.get("HF_TOKEN_2", "") or os.environ.get("HF_TOKEN", "")
 
 STYLE_PREFIX = (
     "Cinematic, dramatic, photorealistic, dark moody lighting, South African setting, "
@@ -19,18 +15,16 @@ STYLE_PREFIX = (
 )
 
 
-def _get_client(token: str):
-    from huggingface_hub import InferenceClient
-    return InferenceClient(provider="auto", api_key=token)
-
-
 def generate_images(story: dict, case: dict = None, output_dir: str = None) -> list[str]:
-    if not HF_TOKENS:
-        raise RuntimeError("No HF_TOKEN or HF_TOKEN_2 set.")
+    if not HF_TOKEN_2:
+        raise RuntimeError("HF_TOKEN_2 not set.")
+
+    from huggingface_hub import InferenceClient
+    client = InferenceClient(provider="auto", api_key=HF_TOKEN_2)
 
     prompts = story.get("image_prompts", [])
     if not prompts:
-        raise ValueError("No image_prompts found in story.")
+        raise ValueError("No image_prompts in story.")
 
     character_desc = ""
     if case:
@@ -46,9 +40,6 @@ def generate_images(story: dict, case: dict = None, output_dir: str = None) -> l
     saved_paths = []
 
     for i, prompt in enumerate(prompts):
-        token = HF_TOKENS[i % len(HF_TOKENS)]
-        client = _get_client(token)
-
         char_infix = f"Main character — {character_desc}. " if character_desc else ""
         full_prompt = STYLE_PREFIX + char_infix + prompt
 
@@ -67,9 +58,9 @@ def generate_images(story: dict, case: dict = None, output_dir: str = None) -> l
             except Exception as e:
                 msg = str(e)
                 print(f"[IMG] attempt {attempt+1} failed: {msg[:200]}")
-                if "rate" in msg.lower() or "429" in msg:
+                if "429" in msg or "rate" in msg.lower():
                     sleep(30)
-                elif "loading" in msg.lower() or "503" in msg:
+                elif "503" in msg or "loading" in msg.lower():
                     sleep(20)
                 else:
                     sleep(5)

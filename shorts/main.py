@@ -24,7 +24,7 @@ def save_story(story: dict, slug: str, stories_dir: str) -> str:
 
 
 def run_pipeline(json_path: str, stories_dir: str, stages: list[int]) -> dict:
-    result = {"file": json_path, "status": "ok", "story": None, "error": None}
+    result = {"file": json_path, "status": "ok", "error": None}
 
     try:
         print(f"\n{'='*60}")
@@ -37,44 +37,51 @@ def run_pipeline(json_path: str, stories_dir: str, stages: list[int]) -> dict:
         print(f"      Sentence: {case['sentence']}")
 
         story = None
+        audio_path = None
+        image_paths = []
 
+        # Stage 2 ? story (uses HF_TOKEN via openai client)
         if 2 in stages:
             slug = Path(json_path).stem
             story_path = Path(stories_dir) / f"{slug}_story.json"
             if story_path.exists():
                 with open(story_path, "r", encoding="utf-8") as f:
                     story = json.load(f)
-                print(f"[2/5] Loaded existing story: {story_path}")
+                print(f"[2/5] Loaded existing story.")
             else:
                 print("[2/5] Structuring story with LLM...")
                 story = structure_story(case)
-                out_path = save_story(story, slug, stories_dir)
+                save_story(story, slug, stories_dir)
                 print(f"      Title : {story.get('title')}")
-                print(f"      Hook  : {story.get('hook')}")
-                print(f"      Saved : {out_path}")
             result["story"] = story
 
-        if 4 in stages:
-            if not story:
-                raise ValueError("Stage 4 requires story (run stage 2 first or load existing).")
-            from shorts.stages.images import generate_images
-            print("[4/5] Generating images with Gemini...")
-            image_paths = generate_images(story, case=case)
-            result["images"] = image_paths
-
+        # Stage 3 ? TTS audio (kokoro, male voice, no token needed)
         if 3 in stages:
             if not story:
-                raise ValueError("Stage 3 requires story.")
+                raise ValueError("Stage 3 needs stage 2.")
             from shorts.stages.tts import generate_audio
-            print("[3/5] Generating audio with Kokoro...")
+            print("[3/5] Generating audio with Kokoro (male voice)...")
             audio_path = generate_audio(story)
             result["audio"] = audio_path
 
+        # Stage 4 ? images (uses HF_TOKEN_2 exclusively)
+        if 4 in stages:
+            if not story:
+                raise ValueError("Stage 4 needs stage 2.")
+            from shorts.stages.images import generate_images
+            print("[4/5] Generating images with FLUX (HF_TOKEN_2)...")
+            image_paths = generate_images(story, case=case)
+            result["images"] = image_paths
+
+        # Stage 5 ? video assembly (needs audio + images)
         if 5 in stages:
+            if not audio_path or not image_paths:
+                raise ValueError("Stage 5 needs stages 3 and 4.")
             from shorts.stages.video import assemble_video
             print("[5/5] Assembling video with FFmpeg...")
-            video_path = assemble_video(result["images"], result["audio"], story)
+            video_path = assemble_video(image_paths, audio_path, story)
             result["video"] = video_path
+            print(f"      Video : {video_path}")
 
     except Exception as e:
         result["status"] = "error"
@@ -85,13 +92,13 @@ def run_pipeline(json_path: str, stories_dir: str, stages: list[int]) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Case Shorts Pipeline")
+    parser = argparse.ArgumentParser()
     parser.add_argument("--cases-dir", default=CASES_DIR)
     parser.add_argument("--stories-dir", default=STORIES_DIR)
-    parser.add_argument("--stages", default="1,2,4")
+    parser.add_argument("--stages", default="1,2,3,4,5")
     parser.add_argument("--file", default=None)
     parser.add_argument("--force", action="store_true")
-    parser.add_argument("--limit", type=int, default=0, help="Max cases to process (0 = all)")
+    parser.add_argument("--limit", type=int, default=0)
     args = parser.parse_args()
 
     stages = [int(s.strip()) for s in args.stages.split(",")]
@@ -101,7 +108,7 @@ def main():
     else:
         files = sorted(Path(args.cases_dir).glob("*.json"))
         if not files:
-            print(f"No JSON files found in {args.cases_dir}")
+            print(f"No JSON files in {args.cases_dir}")
             sys.exit(1)
         print(f"Found {len(files)} case(s) in {args.cases_dir}")
 
@@ -113,7 +120,7 @@ def main():
 
     for json_path in files:
         slug = Path(json_path).stem
-        if not args.force and 4 not in stages and already_processed(slug, args.stories_dir):
+        if not args.force and 2 in stages and already_processed(slug, args.stories_dir) and max(stages) <= 2:
             print(f"Skip (done): {json_path}")
             results["skipped"] += 1
             continue
