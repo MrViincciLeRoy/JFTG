@@ -47,7 +47,10 @@ def generate_images(story: dict, case: dict = None, output_dir: str = None) -> l
 
         url = f"{GEMINI_IMAGE_URL}?key={GEMINI_API_KEY}"
         response = requests.post(url, json=payload, timeout=60)
-        response.raise_for_status()
+
+        if not response.ok:
+            print(f"[IMG ERROR] status={response.status_code} body={response.text[:800]}")
+            response.raise_for_status()
 
         data = response.json()
         parts = data["candidates"][0]["content"]["parts"]
