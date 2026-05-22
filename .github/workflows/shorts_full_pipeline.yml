@@ -11,9 +11,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -23,7 +25,7 @@ jobs:
           sudo apt-get install -y espeak-ng ffmpeg libsndfile1
 
       - name: Install Python deps
-        run: pip install openai requests huggingface_hub pillow kokoro>=0.9.4 soundfile numpy
+        run: pip install openai requests huggingface_hub pillow "kokoro>=0.9.4" soundfile numpy
 
       - name: Run full pipeline (stages 1,2,3,4,45,5)
         env:
@@ -52,10 +54,9 @@ jobs:
           echo "--- Final Videos ---"
           ls output/videos/ 2>/dev/null || echo "none"
 
-      - name: Commit all outputs
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f output/
-          git diff --cached --quiet || git commit -m "pipeline output $(date +'%Y-%m-%d')"
-          git push
+      - name: Upload Pipeline Results as Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: shorts-output-${{ github.run_id }}
+          path: output/
+          retention-days: 7
