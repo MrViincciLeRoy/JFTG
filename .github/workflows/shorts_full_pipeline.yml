@@ -2,7 +2,6 @@ name: Shorts Full Pipeline
 
 on:
   workflow_dispatch:
-  
 
 permissions:
   contents: write
@@ -26,15 +25,16 @@ jobs:
       - name: Install Python deps
         run: pip install openai requests huggingface_hub pillow kokoro>=0.9.4 soundfile numpy
 
-      - name: Run full pipeline (stages 1,2,3,4,5)
+      - name: Run full pipeline (stages 1,2,3,4,45,5)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_TOKEN_2: ${{ secrets.HF_TOKEN_2 }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
         run: |
           python shorts/main.py \
             --cases-dir cases/ \
             --stories-dir output/stories/ \
-            --stages 1,2,3,4,5 \
+            --stages 1,2,3,4,45,5 \
             --limit 3
 
       - name: Show output summary
@@ -43,9 +43,13 @@ jobs:
           ls output/stories/ 2>/dev/null || echo "none"
           echo "--- Audio ---"
           ls output/audio/ 2>/dev/null || echo "none"
-          echo "--- Images ---"
+          echo "--- AI Images ---"
           find output/images/ -name "*.png" 2>/dev/null | wc -l
-          echo "--- Videos ---"
+          echo "--- Stock Photos ---"
+          find output/images/ -name "stock_photo_*.jpg" 2>/dev/null | wc -l
+          echo "--- Stock Videos ---"
+          find output/images/ -name "stock_video_*.mp4" 2>/dev/null | wc -l
+          echo "--- Final Videos ---"
           ls output/videos/ 2>/dev/null || echo "none"
 
       - name: Commit all outputs

@@ -39,8 +39,9 @@ def run_pipeline(json_path: str, stories_dir: str, stages: list[int]) -> dict:
         story = None
         audio_path = None
         image_paths = []
+        stock_media = {}
 
-        # Stage 2 ? story (uses HF_TOKEN via openai client)
+        # Stage 2 ? story
         if 2 in stages:
             slug = Path(json_path).stem
             story_path = Path(stories_dir) / f"{slug}_story.json"
@@ -55,7 +56,7 @@ def run_pipeline(json_path: str, stories_dir: str, stages: list[int]) -> dict:
                 print(f"      Title : {story.get('title')}")
             result["story"] = story
 
-        # Stage 3 ? TTS audio (kokoro, male voice, no token needed)
+        # Stage 3 ? TTS audio
         if 3 in stages:
             if not story:
                 raise ValueError("Stage 3 needs stage 2.")
@@ -64,22 +65,41 @@ def run_pipeline(json_path: str, stories_dir: str, stages: list[int]) -> dict:
             audio_path = generate_audio(story)
             result["audio"] = audio_path
 
-        # Stage 4 ? images (uses HF_TOKEN_2 exclusively)
+        # Stage 4 ? AI images
         if 4 in stages:
             if not story:
                 raise ValueError("Stage 4 needs stage 2.")
             from shorts.stages.images import generate_images
-            print("[4/5] Generating images with FLUX (HF_TOKEN_2)...")
+            print("[4/5] Generating AI images with FLUX...")
             image_paths = generate_images(story, case=case)
             result["images"] = image_paths
 
-        # Stage 5 ? video assembly (needs audio + images)
+        # Stage 45 ? Pexels stock media + random AI image insertion
+        if 45 in stages:
+            if not story:
+                raise ValueError("Stage 45 needs stage 2.")
+            from shorts.stages.stock import fetch_stock_for_story
+            print("[4.5] Fetching Pexels stock + inserting AI images...")
+            stock_media = fetch_stock_for_story(story, image_paths)
+            result["stock"] = stock_media
+
+            # Flatten photos for fallback
+            image_paths = []
+            for scene_key in sorted(stock_media.keys()):
+                image_paths.extend(stock_media[scene_key]["photos"])
+
+        # Stage 5 ? video assembly
         if 5 in stages:
             if not audio_path or not image_paths:
-                raise ValueError("Stage 5 needs stages 3 and 4.")
+                raise ValueError("Stage 5 needs stages 3 and 4 (or 45).")
             from shorts.stages.video import assemble_video
             print("[5/5] Assembling video with FFmpeg...")
-            video_path = assemble_video(image_paths, audio_path, story)
+            video_path = assemble_video(
+                image_paths,
+                audio_path,
+                story,
+                stock_media=stock_media or None,
+            )
             result["video"] = video_path
             print(f"      Video : {video_path}")
 
