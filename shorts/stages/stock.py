@@ -14,13 +14,10 @@ from shorts.config import IMAGES_DIR
 PEXELS_KEY = os.environ.get("PEXELS_API_KEY", "")
 PEXELS_HEADERS = {"Authorization": PEXELS_KEY}
 
-# Pexels free tier: 200 req/hour, 20,000/month
-# We do 2 calls per scene (photos + videos) so throttle to ~18 req/min to stay safe
-REQUEST_DELAY = 3.5  # seconds between API calls
+REQUEST_DELAY = 3.5
 
 
 def _simplify_prompt(prompt: str) -> str:
-    # Strip narrative fluff, keep searchable keywords
     noise = [
         r"^a dark and gritty\s+", r"^a map of\s+", r"^a reenactment of\s+",
         r"^a dramatic\s+", r"^a somber\s+", r"^cinematic[,\s]+",
@@ -36,7 +33,6 @@ def _simplify_prompt(prompt: str) -> str:
     result = prompt.lower().strip()
     for pat in noise:
         result = re.sub(pat, "", result, flags=re.I).strip()
-    # Remove trailing punctuation
     result = result.rstrip(".,;:")
     return result.strip() or prompt[:40]
 
@@ -56,30 +52,6 @@ def _get_photos(query: str, per_page: int = 3) -> list[str]:
         return []
 
 
-def _get_videos(query: str, per_page: int = 2) -> list[str]:
-    try:
-        r = requests.get(
-            "https://api.pexels.com/videos/search",
-            headers=PEXELS_HEADERS,
-            params={"query": query, "per_page": per_page, "orientation": "portrait"},
-            timeout=15,
-        )
-        r.raise_for_status()
-        videos = r.json().get("videos", [])
-        links = []
-        for v in videos:
-            # Prefer HD portrait files
-            files = [f for f in v["video_files"] if f.get("height", 0) >= 720]
-            if not files:
-                files = v["video_files"]
-            best = sorted(files, key=lambda x: x.get("width", 0))[-1]
-            links.append(best["link"])
-        return links
-    except Exception as e:
-        print(f"[STOCK] Video fetch failed ({query}): {e}")
-        return []
-
-
 def _download(url: str, path: Path) -> bool:
     try:
         r = requests.get(url, stream=True, timeout=30)
@@ -94,20 +66,6 @@ def _download(url: str, path: Path) -> bool:
 
 
 def fetch_stock_for_story(story: dict, ai_image_paths: list[str], output_dir: str = None) -> dict:
-    """
-    For each scene in image_prompts:
-      - Fetch stock photos + videos from Pexels
-      - Insert the corresponding AI image at a random position among photos
-    
-    Returns:
-      {
-        "scene_1": {
-          "photos": ["path1.jpg", "path2.jpg", ...],  # includes AI image at random slot
-          "videos": ["path1.mp4", ...]
-        },
-        ...
-      }
-    """
     if not PEXELS_KEY:
         raise RuntimeError("PEXELS_API_KEY not set.")
 
@@ -126,7 +84,6 @@ def fetch_stock_for_story(story: dict, ai_image_paths: list[str], output_dir: st
         query = _simplify_prompt(prompt)
         print(f"[STOCK] {scene_key}: '{query}'")
 
-        # --- Photos ---
         sleep(REQUEST_DELAY)
         photo_urls = _get_photos(query, per_page=3)
         photo_paths = []
@@ -136,7 +93,7 @@ def fetch_stock_for_story(story: dict, ai_image_paths: list[str], output_dir: st
                 photo_paths.append(str(p))
                 print(f"         Photo {j + 1} saved")
 
-        # --- Insert AI image at random position ---
+        # Insert AI image at a random slot among the stock photos
         if i < len(ai_image_paths) and ai_image_paths[i]:
             ai_src = Path(ai_image_paths[i])
             if ai_src.exists():
@@ -146,20 +103,9 @@ def fetch_stock_for_story(story: dict, ai_image_paths: list[str], output_dir: st
                 photo_paths.insert(insert_at, str(ai_dst))
                 print(f"         AI image inserted at slot {insert_at + 1}/{len(photo_paths)}")
 
-        # --- Videos ---
-        sleep(REQUEST_DELAY)
-        video_urls = _get_videos(query, per_page=2)
-        video_paths = []
-        for j, url in enumerate(video_urls):
-            p = scene_dir / f"stock_video_{j + 1}.mp4"
-            if _download(url, p):
-                video_paths.append(str(p))
-                print(f"         Video {j + 1} saved")
-
         result[scene_key] = {
             "query": query,
             "photos": photo_paths,
-            "videos": video_paths,
         }
 
     return result
