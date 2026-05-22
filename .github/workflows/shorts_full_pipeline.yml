@@ -54,9 +54,30 @@ jobs:
           echo "--- Final Videos ---"
           ls output/videos/ 2>/dev/null || echo "none"
 
-      - name: Upload Pipeline Results as Artifacts
+      - name: Upload Stories
         uses: actions/upload-artifact@v4
         with:
-          name: shorts-output-${{ github.run_id }}
-          path: output/
+          name: stories-${{ github.run_id }}
+          path: output/stories/
+          retention-days: 7
+
+      - name: Upload Audio
+        uses: actions/upload-artifact@v4
+        with:
+          name: audio-${{ github.run_id }}
+          path: output/audio/
+          retention-days: 7
+
+      - name: Upload Images
+        uses: actions/upload-artifact@v4
+        with:
+          name: images-${{ github.run_id }}
+          path: output/images/
+          retention-days: 7
+
+      - name: Upload Videos
+        uses: actions/upload-artifact@v4
+        with:
+          name: videos-${{ github.run_id }}
+          path: output/videos/
           retention-days: 7
